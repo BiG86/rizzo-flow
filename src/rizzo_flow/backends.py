@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import hardware
-from .config import DEFAULT_SIZE, GGUF_MODELS, MODELS, gguf_path
+from .config import DEFAULT_QUANT, DEFAULT_SIZE, GGUF, MODELS, QUANTS
 from .llama_runtime import DEVICES as LLAMA_DEVICES
 
 BACKENDS = ("auto", "mlx", "llama")
@@ -32,8 +32,6 @@ ACCELERATOR_ALIASES = {"cuda": "nvidia"}
 # Legacy names that pin the implementation rather than the hardware; kept working.
 STACK_DEVICES = {"mlx": "mlx", "vulkan": "llama", "hip": "llama"}
 DEVICE_CHOICES = tuple(dict.fromkeys((*DEVICES, *STACK_DEVICES)))
-# The quant to download when only `--size` is given; derived so it cannot drift from the pins.
-DEFAULT_QUANT = next(iter(GGUF_MODELS))
 # On CPU, llama.cpp is the validated path and MLX's CPU backend is documented as unusable.
 CPU_STACK_PREFERENCE = ("llama", "mlx")
 
@@ -79,11 +77,14 @@ def mlx_devices() -> dict[str, str]:
 
 def llama_devices() -> dict[str, str]:
     """Accelerator -> llama.cpp device name, from the ggml backends this build ships."""
-    from .backend_llama import library_dir, library_file
+    from .llama_release import find_library, locate
     from .llama_runtime import detect_backends
 
-    base = library_dir()
-    if library_file(base) is None:
+    try:  # `locate` raises when nothing is installed; capability probes must not.
+        base = locate()
+    except ValueError:
+        return {}
+    if base is None or find_library(base) is None:
         return {}
     shipped = detect_backends(base)
     if not shipped:
@@ -103,9 +104,16 @@ def llama_devices() -> dict[str, str]:
 
 def llama_present(directory: Path | None = None) -> bool:
     """libllama is where we expect it, under this platform's own file name."""
-    from .backend_llama import library_dir, library_file
+    from .llama_release import find_library
 
-    return library_file(directory or library_dir()) is not None
+    if directory is None:
+        from .llama_release import locate
+
+        try:  # `locate` raises when nothing is installed; a probe reports absence instead.
+            directory = locate()
+        except ValueError:
+            return False
+    return directory is not None and find_library(directory) is not None
 
 
 def available_backends() -> list[str]:
@@ -245,7 +253,7 @@ def ensure_options(backend: str, *, bits) -> None:
     if backend == "llama" and bits is not None:
         raise ValueError(
             "--bits quantizes MLX weights in memory; with llama.cpp choose a quantized GGUF "
-            "instead (--gguf PATH or --quant " + "|".join(GGUF_MODELS) + ")"
+            "instead (--gguf PATH or --quant " + "|".join(QUANTS) + ")"
         )
 
 
@@ -278,8 +286,10 @@ def load_backend(
 
         if gguf:
             path, expected = Path(gguf), None
-        elif size in MODELS:
-            path, expected = gguf_path(quant, size), GGUF_MODELS[quant].sha256
+        elif (size, quant) in GGUF:
+            # Upstream pins every (size, quant) pair, so a wrong pair is its own loud error.
+            spec = GGUF[(size, quant)]
+            path, expected = spec.path, spec.sha256
         else:
             raise ValueError(f"Unknown size {size}; available: {', '.join(MODELS)}")
         return LlamaBackend.load(
@@ -304,18 +314,25 @@ def load_backend(
 
 def describe() -> dict:
     """What `rizzo devices` prints: the hardware, both stacks, and what `auto` would pick."""
-    from .backend_llama import library_dir
+    from .llama_release import find_library, locate
     from .llama_runtime import detect_backends
 
+    probe = {"library": None, "present": False, "devices": [], "ggml_backends": []}
+    try:  # Probe only: locating the runtime is the loader's business, not the report's.
+        base = locate()
+    except ValueError:
+        base = None
+    if base is not None and find_library(base) is not None:
+        probe = {
+            "library": str(base),
+            "present": True,
+            "devices": list(LLAMA_DEVICES),
+            "ggml_backends": detect_backends(base),
+        }
     report = {
         "hardware": hardware.probe(),
         "available": available_backends(),
-        "llama": {
-            "library": str(library_dir()),
-            "present": llama_present(),
-            "devices": list(LLAMA_DEVICES),
-            "ggml_backends": detect_backends(library_dir()),
-        },
+        "llama": probe,
     }
     if mlx_importable():
         from .runtime import describe as describe_mlx

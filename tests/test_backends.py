@@ -8,8 +8,9 @@ from pathlib import Path
 
 import pytest
 
-from rizzo_flow import backend_llama, backends, config
+from rizzo_flow import backends, config
 from rizzo_flow.backends import Routing, announce, route
+from rizzo_flow.llama_release import library_name
 
 # Capability maps shaped like the ones the real probes return.
 MLX_APPLE = {"apple": "mlx", "cpu": "cpu"}
@@ -34,7 +35,7 @@ def pick(device="auto", *, hardware=("amd", "cpu"), mlx_caps=None, llama_caps=No
 
 
 def test_llama_present_reads_the_directory_it_is_given(tmp_path):
-    (tmp_path / backend_llama.library_names()[0]).touch()
+    (tmp_path / library_name()).touch()
     assert backends.llama_present(tmp_path) is True
     assert backends.llama_present(tmp_path / "absent") is False
 
@@ -165,35 +166,25 @@ def test_quant_is_rejected_for_the_mlx_backend():
         backends.load_backend("mlx", quant="bf16")
 
 
-def test_download_rejects_an_unknown_quant():
-    with pytest.raises(ValueError, match="Unknown quant"):
-        config.download_gguf("q9_9")
-
-
-def test_gguf_path_refuses_a_quant_pinned_for_another_size():
-    # Only a 4b GGUF is pinned: asking for 1.7b must fail loudly, not load 4B weights.
-    with pytest.raises(ValueError, match="1.7b"):
-        config.gguf_path("q8_0", "1.7b")
-    assert config.gguf_path("q8_0", "4b").name == config.GGUF_MODELS["q8_0"].file
-
-
-def test_pinned_quants_expose_path_and_digest():
-    for quant, spec in config.GGUF_MODELS.items():
+def test_pinned_ggufs_expose_path_and_digest():
+    for (size, quant), spec in config.GGUF.items():
         assert len(spec.sha256) == 64
-        assert config.gguf_path(quant).name == spec.file
-        assert config.find_gguf_pin(spec.file) is spec
-
-
-def test_model_dir_env_override(monkeypatch, tmp_path):
-    monkeypatch.setenv(config.MODEL_DIR_ENV, str(tmp_path))
-    assert config.gguf_path("q8_0").parent == tmp_path
+        assert spec.path.name == spec.file
+        assert size in config.MODELS
+        assert quant in config.QUANTS
+        assert config.GGUF[(size, quant)] is spec
 
 
 def test_describe_reports_both_stacks_and_the_auto_choice():
     report = backends.describe()
     assert set(report) >= {"available", "llama", "mlx", "hardware", "auto"}
     assert report["hardware"][-1] == "cpu"
-    assert report["llama"]["devices"] == list(backends.LLAMA_DEVICES)
-    assert isinstance(report["llama"]["present"], bool)
+    llama = report["llama"]
+    if llama["present"]:
+        assert llama["devices"] == list(backends.LLAMA_DEVICES)
+        assert llama["library"] is not None and llama["ggml_backends"]
+    else:
+        assert llama["library"] is None and llama["devices"] == []
+    assert isinstance(llama["present"], bool)
     assert report["mlx"]["available"] in (True, False)
     assert "backend" in report["auto"] or "error" in report["auto"]

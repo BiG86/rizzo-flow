@@ -1,7 +1,3 @@
-import hashlib
-import os
-import shutil
-import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -32,6 +28,79 @@ DEFAULT_SIZE = "4b"
 MODEL_ID = MODELS[DEFAULT_SIZE].repo
 MODEL_REVISION = MODELS[DEFAULT_SIZE].revision
 RUNTIME_REVISION = "de2b4379fa1e2f2e1f99d84c83f0e008f651d86c"
+
+
+@dataclass(frozen=True)
+class GgufSpec:
+    """One file of the GGUF conversions published by the model's authors, pinned by hash."""
+
+    size: str
+    quant: str
+    repo: str
+    revision: str
+    file: str
+    sha256: str
+
+    @property
+    def path(self) -> Path:
+        return Path("models") / self.repo.split("/")[1] / self.file
+
+    @property
+    def url(self) -> str:
+        return f"https://huggingface.co/{self.repo}/resolve/{self.revision}/{self.file}"
+
+
+_GGUF_4B = ("XHToken/Spark-X2.5-4B-GGUF", "9826e0be84e6e6e8b9668abc91421109a1df1e2d")
+_GGUF_17B = ("XHToken/Spark-X2.5-1.7B-GGUF", "1f7fa33b1245c14730da39e125714ad3a327901b")
+GGUF = {
+    (spec.size, spec.quant): spec
+    for spec in (
+        GgufSpec(
+            "4b",
+            "q8_0",
+            *_GGUF_4B,
+            "Spark-X2.5-4B-Q8_0.gguf",
+            "5c2c3c190e4337e1016b8593ca8e26e8b18c972200b107385d4ec61a25d9dea2",
+        ),
+        GgufSpec(
+            "4b",
+            "q4_k_m",
+            *_GGUF_4B,
+            "Spark-X2.5-4B-Q4_K_M.gguf",
+            "adfcfa19a4ed6a5985da8bf565fe15f8e1a7e131d79bae2d19d48d1c40109428",
+        ),
+        GgufSpec(
+            "4b",
+            "bf16",
+            *_GGUF_4B,
+            "Spark-X2.5-4B.gguf",
+            "8cecf405a41a4a10f833530910c2e13fde9fb39c325c8afc3c5d10e4181e1a14",
+        ),
+        GgufSpec(
+            "1.7b",
+            "q8_0",
+            *_GGUF_17B,
+            "Spark-X2.5-1.7B-Q8_0.gguf",
+            "cd77c03185a834bb1162a4b7713520be5838058bfc54873645beff470bb24442",
+        ),
+        GgufSpec(
+            "1.7b",
+            "q4_k_m",
+            *_GGUF_17B,
+            "Spark-X2.5-1.7B-Q4_K_M.gguf",
+            "902bde2522394954ac17821b3e5fd0df02defbc6944f122253f2580acf0503f4",
+        ),
+        GgufSpec(
+            "1.7b",
+            "bf16",
+            *_GGUF_17B,
+            "Spark-X2.5-1.7B.gguf",
+            "67d5f2f06e6d898efcf0dc40cab8528bc82b871c8dafb0936784183d2c10cdd9",
+        ),
+    )
+}
+QUANTS = ("q8_0", "q4_k_m", "bf16")
+DEFAULT_QUANT = "q8_0"
 DEFAULT_MODEL_PATH = MODELS[DEFAULT_SIZE].path
 
 
@@ -46,94 +115,12 @@ def identify(config: dict) -> ModelSpec:
     )
 
 
-# --- llama.cpp backend: pinned GGUF artifacts ---------------------------------------------
-# The GGUF is a third-party conversion of the pinned original weights, so both provenance
-# layers are recorded: the model identity comes from `MODELS`, the artifact from here.
-MODEL_DIR_ENV = "RIZZO_MODEL_DIR"
+def download_gguf(size=DEFAULT_SIZE, quant=DEFAULT_QUANT, destination=None, progress=None):
+    """Fetch one pinned GGUF file, verified against its sha256."""
+    from .llama_release import fetch
 
-
-@dataclass(frozen=True)
-class GgufSpec:
-    size: str
-    repo: str
-    revision: str
-    file: str
-    sha256: str
-    quant: str
-
-
-GGUF_MODELS = {
-    spec.quant: spec
-    for spec in (
-        GgufSpec(
-            "4b",
-            "stornic56/Spark-X2.5-4B-GGUF",
-            "7ce72e5cba148e5e4bcd0ff0e59c8268f9820619",
-            "Spark-X2.5-4B-Q8_0.gguf",
-            "092a263df8c891cdddd98b14b9ed71e44bb84643049fbfe656fb682b71d316c6",
-            "q8_0",
-        ),
-        GgufSpec(
-            "4b",
-            "stornic56/Spark-X2.5-4B-GGUF",
-            "7ce72e5cba148e5e4bcd0ff0e59c8268f9820619",
-            "Spark-X2.5-4B-bf16.gguf",
-            "2ff41881527d095dbc02fe0c9b8e6ecd221dfe28b242d1f03dc5592d1b39fbb2",
-            "bf16",
-        ),
-    )
-}
-
-
-def model_dir() -> Path:
-    """Where GGUF checkpoints live; `RIZZO_MODEL_DIR` overrides the in-repo `models/`."""
-    return Path(os.environ.get(MODEL_DIR_ENV, "models"))
-
-
-def gguf_path(quant: str, size: str = DEFAULT_SIZE) -> Path:
-    """Path of the pinned GGUF for this size and quant; refuses a pin of another size."""
-    if quant not in GGUF_MODELS:
-        raise ValueError(f"Unknown quant {quant}; available: {', '.join(GGUF_MODELS)}")
-    spec = GGUF_MODELS[quant]
-    if spec.size != size:
-        raise ValueError(
-            f"No GGUF pinned for size {size}: the {quant} artifact is {spec.size}. "
-            "Pin one in config.GGUF_MODELS or pass --gguf."
-        )
-    return model_dir() / spec.file
-
-
-def find_gguf_pin(filename: str) -> GgufSpec | None:
-    """Match a local GGUF file name back to its pinned artifact, for provenance."""
-    return next((spec for spec in GGUF_MODELS.values() if spec.file == filename), None)
-
-
-def sha256_file(path: Path) -> str:
-    """Streaming digest: checkpoints are gigabytes, so they are never read into memory."""
-    with Path(path).open("rb") as stream:
-        return hashlib.file_digest(stream, "sha256").hexdigest()
-
-
-def download_gguf(quant: str, destination=None, size: str = DEFAULT_SIZE) -> Path:
-    """Fetch the pinned GGUF with the standard library, verifying the pinned sha256."""
-    if quant not in GGUF_MODELS:
-        raise ValueError(f"Unknown quant {quant}; available: {', '.join(GGUF_MODELS)}")
-    spec = GGUF_MODELS[quant]
-    target = Path(destination) if destination else gguf_path(quant, size)
-    if target.is_file() and sha256_file(target) == spec.sha256:
-        return target
-    target.parent.mkdir(parents=True, exist_ok=True)
-    url = f"https://huggingface.co/{spec.repo}/resolve/{spec.revision}/{spec.file}"
-    partial = target.with_name(target.name + ".part")
-    request = urllib.request.Request(url, headers={"User-Agent": "rizzo-flow"})
-    with urllib.request.urlopen(request, timeout=120) as response, partial.open("wb") as out:
-        shutil.copyfileobj(response, out, length=1 << 20)
-    digest = sha256_file(partial)
-    if digest != spec.sha256:
-        partial.unlink()
-        raise ValueError(f"{spec.file}: sha256 mismatch (expected {spec.sha256}, got {digest})")
-    partial.replace(target)
-    return target
+    spec = GGUF[(size, quant)]
+    return fetch(spec.url, Path(destination) if destination else spec.path, spec.sha256, progress)
 
 
 def download_model(destination=None, size=DEFAULT_SIZE):

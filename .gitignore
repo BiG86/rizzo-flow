@@ -219,6 +219,7 @@ __marimo__/
 
 # Rizzo Flow
 models/
+runtimes/
 .research/
 .cache/
 # Local runs, files or directories: `rizzo evaluate --output results/local-x` writes a file,

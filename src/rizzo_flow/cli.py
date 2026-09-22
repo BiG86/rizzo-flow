@@ -3,8 +3,9 @@ import json
 import sys
 from pathlib import Path
 
-from .backends import BACKENDS, DEFAULT_QUANT, DEVICE_CHOICES
-from .config import DEFAULT_SIZE, GGUF_MODELS, MODELS, download_gguf, download_model
+from .config import DEFAULT_QUANT, DEFAULT_SIZE, MODELS, QUANTS, download_gguf, download_model
+from .llama_release import ACCELERATORS
+from .loader import BACKENDS, DEVICES
 
 
 def write_json(value, destination):
@@ -27,19 +28,33 @@ def read_jsonl(path):
     ]
 
 
+def progress(name, done, total):
+    """One carriage-returned line per file; silent when stderr is not a terminal."""
+    if sys.stderr.isatty():
+        share = f"{100 * done / total:5.1f}%" if total else f"{done >> 20} MiB"
+        sys.stderr.write(f"\r{name}: {share}")
+        if total and done >= total:
+            sys.stderr.write("\n")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Rizzo Flow — local Spark typed decisions")
     commands = parser.add_subparsers(dest="command", required=True)
-    download = commands.add_parser("download", help="Download the pinned original Spark checkpoint")
-    download.add_argument("--size", choices=tuple(MODELS), default=DEFAULT_SIZE)
-    download.add_argument("--destination", type=Path, help="Default: models/<checkpoint name>")
-    download.add_argument(
-        "--format",
-        choices=("mlx", "gguf"),
-        default="mlx",
-        help="mlx = original safetensors for the MLX backend; gguf = pinned llama.cpp artifact",
+    download = commands.add_parser(
+        "download", help="Download the pinned llama.cpp runtime for this machine and the weights"
     )
-    download.add_argument("--quant", choices=tuple(GGUF_MODELS), default=DEFAULT_QUANT)
+    download.add_argument("--size", choices=tuple(MODELS), default=DEFAULT_SIZE)
+    download.add_argument("--backend", choices=BACKENDS, default="llama")
+    download.add_argument("--quant", choices=QUANTS, default=DEFAULT_QUANT, help="GGUF file")
+    download.add_argument(
+        "--runtime",
+        choices=ACCELERATORS,
+        default="auto",
+        help="llama.cpp build: auto = Metal on a Mac, CUDA with an NVIDIA driver, else Vulkan "
+        "(AMD, Intel and NVIDIA GPUs)",
+    )
+    download.add_argument("--only", choices=("runtime", "weights"))
+    download.add_argument("--destination", type=Path, help="Weights; default: under models/")
     schema = commands.add_parser("schema", help="Print the JSON Schema for requests")
     schema.add_argument("--output")
     schema.add_argument("--response", action="store_true", help="Print the output schema")
@@ -51,34 +66,17 @@ def main():
     for name in ("decide", "serve", "evaluate"):
         p = commands.add_parser(name)
         p.add_argument("--size", choices=tuple(MODELS), default=DEFAULT_SIZE)
-        p.add_argument("--model", type=Path, help="Checkpoint directory; overrides --size")
-        p.add_argument("--bits", type=int, choices=(4, 8))
-        p.add_argument(
-            "--backend",
-            choices=BACKENDS,
-            default="auto",
-            help="auto = best stack for this machine's GPU; mlx/llama pin one",
-        )
-        p.add_argument(
-            "--gguf",
-            type=Path,
-            help="GGUF checkpoint; implies the llama backend and settles the choice",
-        )
-        p.add_argument(
-            "--quant",
-            choices=tuple(GGUF_MODELS),
-            default=DEFAULT_QUANT,
-            help="Which pinned GGUF to load (llama backend only)",
-        )
+        p.add_argument("--backend", choices=BACKENDS, default="llama")
+        p.add_argument("--model", type=Path, help="GGUF file (MLX: checkpoint directory)")
+        p.add_argument("--quant", choices=QUANTS, help=f"Pinned GGUF file; default {DEFAULT_QUANT}")
+        p.add_argument("--bits", type=int, choices=(4, 8), help="MLX backend only")
         p.add_argument(
             "--device",
-            choices=DEVICE_CHOICES,
+            choices=DEVICES,
             default="auto",
-            help=(
-                "auto = best accelerator present; gpu/apple/nvidia/amd/intel pin hardware; "
-                "mlx/vulkan/hip pin a stack; cpu forces CPU"
-            ),
+            help="auto = best GPU of the installed runtime, else CPU; a family name requires it",
         )
+        p.add_argument("--threads", type=int, help="CPU threads (llama backend)")
         p.add_argument("--batch-size", type=int, default=4)
         # --max-tokens is the former name, kept as an alias.
         p.add_argument(
@@ -102,15 +100,20 @@ def main():
     args = parser.parse_args()
     try:
         if args.command == "download":
-            if args.format == "gguf":
-                print(download_gguf(args.quant, args.destination, args.size))
-            else:
+            if args.backend == "mlx":
                 print(download_model(args.destination, args.size))
+                return
+            if args.only != "weights":
+                from .llama_release import install
+
+                print(install(args.runtime, progress))
+            if args.only != "runtime":
+                print(download_gguf(args.size, args.quant, args.destination, progress))
             return
         if args.command == "devices":
-            from .backends import describe as describe_backends
+            from .loader import describe
 
-            write_json(describe_backends(), None)
+            write_json(describe(), None)
             return
         if args.command == "schema":
             from .responses import Response
@@ -125,7 +128,6 @@ def main():
                 fit_temperature(read_jsonl(args.input), args.fingerprint).model_dump(), args.output
             )
             return
-        from .backends import load_backend
         from .calibration import Calibration
         from .engine import Engine
 
@@ -134,16 +136,18 @@ def main():
             from .schema import Request
 
             request = Request.model_validate_json(args.input.read_text(encoding="utf-8"))
+        from .loader import load_backend
+
         backend = load_backend(
             args.backend,
             size=args.size,
             model=args.model,
-            gguf=args.gguf,
             quant=args.quant,
             bits=args.bits,
             device=args.device,
             ctx=args.ctx,
             batch_size=args.batch_size,
+            threads=args.threads,
         )
         calibration = Calibration.from_file(args.calibration) if args.calibration else None
         engine = Engine(backend, ctx=args.ctx, calibration=calibration)
