@@ -76,9 +76,11 @@ class Rizzo:
             size=args.size,
             model=args.model,
             quant=args.quant,
+            weights=args.weights,
             bits=args.bits,
             device=args.device,
             batch_size=args.batch_size,
+            **({"kv_type": args.kv_type} if args.kv_type else {}),
         )
         self.engine = Engine(backend)
         self.metadata = {**backend.metadata, "batch_size": args.batch_size}
@@ -211,11 +213,13 @@ def main():
     parser.add_argument("--backend", choices=("llama", "mlx"), default="llama", help="Rizzo only")
     parser.add_argument("--size", default="4b", help="Rizzo checkpoint: 4b or 1.7b")
     parser.add_argument("--quant", help="Rizzo on llama.cpp: q8_0 (default), q4_k_m, bf16")
+    parser.add_argument("--weights", choices=("flow", "base"), help="pinned GGUF; default flow")
     parser.add_argument("--device", default="auto")
     parser.add_argument("--model", help="Rizzo: GGUF file or MLX directory; SemIf: repository")
     parser.add_argument("--revision", default="851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a")
     parser.add_argument("--bits", type=int, choices=(4, 8), help="MLX quantization")
     parser.add_argument("--batch-size", type=int, default=4, help="Rizzo suffix microbatch")
+    parser.add_argument("--kv-type", choices=("f16", "q8_0", "q4_0"), help="Rizzo on llama.cpp")
     parser.add_argument("--shape-states", type=int, default=37, help="Shared-mode states")
     parser.add_argument("--direct-states", type=int, default=3, help="Fresh-mode states (slow)")
     args = parser.parse_args()

@@ -6,6 +6,7 @@ import io
 import re
 import tarfile
 import threading
+import types
 import zipfile
 
 import pytest
@@ -193,6 +194,47 @@ def test_interrupted_download_resumes_where_it_stopped(tmp_path):
     assert requests == [None, f"bytes={len(payload) // 3}-"]
 
 
+def test_token_goes_to_the_first_host_only_and_denials_fail_fast(tmp_path):
+    payload = b"private weights"
+    seen = []
+
+    class Hub(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            seen.append((self.path, self.headers.get("Authorization")))
+            if self.path == "/resolve/weights.gguf":  # the hub redirects to its CDN
+                self.send_response(302)
+                self.send_header("Location", "/cdn/weights.gguf")
+                self.end_headers()
+                return
+            if self.path == "/denied.gguf":
+                self.send_response(401)
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Hub)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    try:
+        digest = hashlib.sha256(payload).hexdigest()
+        target = release.fetch(
+            f"{base}/resolve/weights.gguf", tmp_path / "w.gguf", digest, token="t"
+        )
+        with pytest.raises(ValueError, match="HTTP 401"):
+            release.fetch(f"{base}/denied.gguf", tmp_path / "d.gguf", digest)
+    finally:
+        server.shutdown()
+    assert target.read_bytes() == payload
+    assert seen[:2] == [("/resolve/weights.gguf", "Bearer t"), ("/cdn/weights.gguf", None)]
+    assert len(seen) == 3  # a denial is not retried
+
+
 def test_install_and_locate(tmp_path, monkeypatch):
     at(monkeypatch, "win32", "x64", nvidia=False)
     monkeypatch.setattr(release, "library_name", lambda: "llama.dll")
@@ -237,3 +279,27 @@ def test_locate_orders_by_pick_not_by_preference(monkeypatch, tmp_path):
     monkeypatch.setattr(release, "find_library", lambda directory: directory / "libllama.so")
     monkeypatch.delenv(release.RUNTIME_DIR_ENV, raising=False)
     assert release.locate() == tmp_path / "vulkan"
+
+
+def test_rosetta_is_reported_so_the_cpu_package_is_not_a_surprise(monkeypatch):
+    """An Intel interpreter on Apple Silicon can only load the Intel build: `host()` sees x64 and
+    the GPU stays out of reach, so `download` has something to warn about."""
+    monkeypatch.setattr(release.sys, "platform", "darwin")
+    monkeypatch.setattr(release, "host", lambda: ("darwin", "x64"))
+    monkeypatch.setattr(
+        release.subprocess, "run", lambda *a, **k: types.SimpleNamespace(stdout="1\n")
+    )
+    assert release.translated() is True
+
+
+def test_a_real_intel_mac_is_not_mistaken_for_rosetta(monkeypatch):
+    monkeypatch.setattr(release.sys, "platform", "darwin")
+    monkeypatch.setattr(release, "host", lambda: ("darwin", "x64"))
+    monkeypatch.setattr(release.subprocess, "run", lambda *a, **k: types.SimpleNamespace(stdout=""))
+    assert release.translated() is False
+
+
+def test_translation_is_a_macos_question_only(monkeypatch):
+    monkeypatch.setattr(release.sys, "platform", "linux")
+    monkeypatch.setattr(release, "host", lambda: ("linux", "x64"))
+    assert release.translated() is False

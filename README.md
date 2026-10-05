@@ -41,9 +41,23 @@ or Intel GPU, or no GPU at all.
 
 > **Independent project.** Rizzo Flow is not affiliated with TypeSafe and does not reproduce Jev's
 > proprietary architecture or its RLCD training. It reproduces the *interface pattern* with an
-> off-the-shelf open model, in the spirit of [SemIf](https://github.com/TheoLeeCJ/SemIf), which
-> inspired it. Probabilities are **uncalibrated** unless you calibrate them on your own data, and
+> open model (Spark-X2.5, with our own [LoRA fine-tune](#fine-tuning) on public data), in the
+> spirit of [SemIf](https://github.com/TheoLeeCJ/SemIf), which inspired it. Probabilities are
+> **uncalibrated** unless you calibrate them on your own data, and
 > we make no claim of matching Jev or SemIf in quality. Every number below comes with its caveats.
+
+**New: fine-tuned weights.** Since 25 September 2026 the default model is Spark-X2.5 with our own
+LoRA fine-tune for typed decisions ([how and on what](#training-and-calibration)). On the
+[`typed-decisions`](https://huggingface.co/datasets/LocalLLaMA/typed-decisions) benchmark, same GPU,
+Q8_0:
+
+| | Accuracy ↑ | KL from gold ↓ | Brier ↓ | ECE ↓ |
+| --- | ---: | ---: | ---: | ---: |
+| Spark-X2.5-4B, original | 0.574 | 2.899 | 0.480 | 0.349 |
+| **Rizzo Flow 4B, fine-tuned** | **0.648** | **0.452** | **0.205** | **0.112** |
+| TypeSafe Jev 1.13.0 (its dataset card) | 0.727 | 1.442 | 0.148 | – |
+
+Better answers (+7.4 points) and much better-shaped probabilities, still below Jev in accuracy.
 
 <div align="center">
 <br />
@@ -64,7 +78,7 @@ macOS, Windows and Linux; nothing is compiled and no GPU toolkit is installed.
 ```bash
 git clone https://github.com/Rizzo-AI-Academy/rizzo-flow && cd rizzo-flow
 uv sync --locked          # seconds: four small Python packages
-uv run rizzo download     # llama.cpp for this machine + Spark-X2.5-4B Q8_0 (~4.4 GB)
+uv run rizzo download     # llama.cpp for this machine + Rizzo Flow 4B Q8_0 (~4.4 GB)
 uv run rizzo serve        # → http://127.0.0.1:8017/playground
 ```
 
@@ -115,9 +129,9 @@ sha256. `rizzo devices` shows what the runtime sees and what `--device auto` wil
 | Your machine | Build picked (`--runtime auto`) | Status |
 | --- | --- | --- |
 | Windows or Linux, NVIDIA GPU | `cuda` — CUDA 13 libraries included; needs a recent driver, no toolkit | **tested on Windows 10 + RTX 5060 Ti**: every current number in this README. Linux not tried |
-| Windows or Linux, AMD or Intel GPU | `vulkan` — uses the GPU driver you already have | **the Vulkan build was tested on the same RTX 5060 Ti** and gives the same answers as CUDA. Not tried on AMD or Intel hardware: [reports welcome](https://github.com/Rizzo-AI-Academy/rizzo-flow/issues) |
-| Mac, Apple Silicon | `metal` | not tried yet |
-| No GPU | `vulkan` falls back to the CPU; or `--runtime cpu` | not tried: we have no CPU number |
+| Windows or Linux, AMD or Intel GPU | `vulkan` — uses the GPU driver you already have | Community reports cover an AMD Radeon 780M and Intel Iris Xe; see [#11](https://github.com/Rizzo-AI-Academy/rizzo-flow/issues/11) and [#7](https://github.com/Rizzo-AI-Academy/rizzo-flow/issues/7). The Intel run used Q4_K_M; these reports have not been independently reproduced by the maintainers. |
+| Mac, Apple Silicon | `metal` | A community report covers an M3 Pro; see [#5](https://github.com/Rizzo-AI-Academy/rizzo-flow/issues/5). The run has not been independently reproduced by the maintainers. The two fixes it needed (context freed before exit, a warning when an x86_64 Python under Rosetta hides the GPU) are merged ([#4](https://github.com/Rizzo-AI-Academy/rizzo-flow/pull/4)), and so is `--device metal` on M4 ([#9](https://github.com/Rizzo-AI-Academy/rizzo-flow/issues/9)). |
+| No GPU | `vulkan` falls back to the CPU; or `--runtime cpu` | CPU mode was reported on an Intel laptop with an iGPU ([#7](https://github.com/Rizzo-AI-Academy/rizzo-flow/issues/7)); a GPU-free host has not been tested. |
 
 Other builds on request: `uv run rizzo download --only runtime --runtime rocm` (AMD, ROCm/HIP),
 `--runtime sycl` (Intel oneAPI), `--runtime cpu`. Several builds can live side by side and
@@ -128,19 +142,29 @@ that header.
 
 Everything is pinned: llama.cpp release
 [`b11081`](https://github.com/ggml-org/llama.cpp/releases/tag/b11081) from its official GitHub
-releases, and the GGUF files published by the model's authors
+releases, and the GGUF files, by commit and sha256. By default `rizzo download` fetches **our
+fine-tuned weights** ([4B](https://huggingface.co/rizzoaiacademy/rizzo-flow),
+[1.7B](https://huggingface.co/rizzoaiacademy/rizzo-flow-1.7b): Spark-X2.5 with a LoRA trained for
+typed decisions and merged in, see [Fine-tuning](#fine-tuning)). `--weights base` fetches the
+original files published by the model's authors instead
 ([4B](https://huggingface.co/XHToken/Spark-X2.5-4B-GGUF),
 [1.7B](https://huggingface.co/XHToken/Spark-X2.5-1.7B-GGUF)). The runtime goes to `runtimes/`,
 the weights to `models/`, both git-ignored.
 
 ### Models and options
 
-| `--size` | GGUF files (`--quant`) | Status |
-| --- | --- | --- |
-| `4b` (default) | `q8_0` 4.4 GB (default) · `q4_k_m` 2.6 GB · `bf16` 8.2 GB | every result in this README unless it says 1.7B |
-| `1.7b` | `q8_0` 1.8 GB (default) · `q4_k_m` 1.1 GB · `bf16` 3.4 GB | ~2× faster, **much less accurate**. With abstention enabled it picks "cannot determine" almost every time: use it with `"allow_abstain": false` (the Jev-compatible endpoint always does) and check it on your own data |
+| `--size` | `--weights flow` (default): our fine-tune | `--weights base`: original Spark-X2.5 | Status |
+| --- | --- | --- | --- |
+| `4b` (default) | `q8_0` 4.4 GB (default) · `q4_k_m` 2.6 GB · `bf16` 8.2 GB | `q8_0` 4.4 GB · `q4_k_m` 2.6 GB · `bf16` 8.2 GB | recommended |
+| `1.7b` | `q8_0` 1.8 GB (default) · `q4_k_m` 1.1 GB · `bf16` 3.4 GB | `q8_0` 1.8 GB · `q4_k_m` 1.1 GB · `bf16` 3.4 GB | ~2× faster, **much less accurate**. The base 1.7B picks "cannot determine" almost every time when abstention is enabled: use it with `"allow_abstain": false` (the Jev-compatible endpoint always does) and check it on your own data |
 
-`rizzo serve` flags: `--size`, `--quant`, `--device auto|gpu|cpu|cuda|vulkan|metal|rocm|sycl`,
+The fine-tuned Q4_K_M files are ours (`llama-quantize` b11081 from the BF16 GGUF, no importance
+matrix): on typed-decisions the 4B one ties Q8_0, the 1.7B one loses 5 points (see
+[Fine-tuning](#fine-tuning)). The served model
+ID says which weights answer: `rizzo-flow-4b-q8_0` for the fine-tune, `rizzo-spark-x2.5-4b-q8_0`
+for the original file (`rizzo-latest` always works).
+
+`rizzo serve` flags: `--size`, `--quant`, `--weights flow|base`, `--device auto|gpu|cpu|cuda|vulkan|metal|rocm|sycl`,
 `--port`, `--host`, `--batch-size` (question micro-batch, default 4), `--ctx` (token limit per
 question, default 8192), `--threads` (CPU), `--model /path/to/file.gguf` (overrides `--size`),
 `--calibration fit.json`. Set `RIZZO_API_KEY=...` before starting for Bearer auth on the
@@ -157,14 +181,125 @@ Every result marked "MLX" below was measured with it, and it is still there as a
 
 ```bash
 uv sync --locked --extra mlx                  # Apple Silicon · or --extra cuda (NVIDIA) · or --extra cpu
-uv run --no-sync rizzo download --backend mlx # original safetensors, ~8 GB
+uv run --no-sync rizzo download --backend mlx # the fine-tune as BF16 safetensors, ~8 GB
 uv run --no-sync rizzo serve --backend mlx --bits 8   # --bits 4|8 quantize in memory; omit for BF16
 ```
 
 With an MLX extra installed use `uv run --no-sync`: a plain `uv run` re-syncs the environment
 without the extra and removes it. Prompt, API and result format are the same; probabilities are
-not (different kernels and quantization).
+not (different kernels and quantization). MLX loads the same fine-tune from the safetensors
+checkpoint in the same Hugging Face repository (the weights are bit-identical to the BF16 GGUF;
+on MLX-CUDA the 4B matches llama.cpp BF16 within 0.001); `--weights base` loads XHToken's
+original checkpoint.
 </details>
+
+---
+
+## Training and calibration
+
+### Fine-tuning
+
+The default weights are Spark-X2.5 with a **LoRA fine-tune for typed decisions**, merged in and
+converted to GGUF: [`rizzoaiacademy/rizzo-flow`](https://huggingface.co/rizzoaiacademy/rizzo-flow)
+(4B) and [`rizzoaiacademy/rizzo-flow-1.7b`](https://huggingface.co/rizzoaiacademy/rizzo-flow-1.7b).
+The goal was not new knowledge but better-shaped answers: the base model puts 0.9999 on its pick
+even when it is wrong, and the fine-tune learns to spread probability when the evidence is split.
+
+- **The same forward pass as inference.** No text target: the loss is a soft cross-entropy between
+  the target distribution and the softmax over the answer letters at the last prompt position,
+  with the exact prompts of `spark-decisions-v3`. Only the LoRA adapters train (r 16, alpha 32,
+  every linear layer of attention and MLP; 32.4M parameters on the 4B, 16.7M on the 1.7B).
+- **Public data, no Jev outputs.** 28,321 questions from
+  [`tasksource/procedural-typed-decisions`](https://huggingface.co/datasets/tasksource/procedural-typed-decisions),
+  [`ZefanCai/Open-Jev`](https://huggingface.co/datasets/ZefanCai/Open-Jev)
+  (`release-v2-redistributable`, without `customer-control-v1` and without `workflow-controls-v1`,
+  which shares its four workflows with the benchmark below) and 12 configs of
+  [`Praveenrajus/jev-bench`](https://huggingface.co/datasets/Praveenrajus/jev-bench). Every
+  training state containing text from our evaluation sets (SemIf fixtures, typed-decisions test,
+  smoke) was removed.
+- **One epoch**, AdamW lr 5e-5, 16 questions per step, 1,770 steps: 41 minutes (4B) and 19 minutes
+  (1.7B) on one RTX PRO 6000. The adapter alone and the training log are in the Hugging Face
+  repositories. Pipeline, data vetting and every choice: [docs/training.md](docs/training.md)
+  (Italian); scripts in [`training/`](training/).
+
+<a href="assets/training_charts.png"><img src="assets/training_charts.png" alt="Training curves on the dev set (600 held-out validation questions, evaluated every 200 steps): accuracy per source (tasksource, Open-Jev, jev-bench), overall accuracy and loss for the 4B (red) and the 1.7B (green); overall accuracy goes from 0.55 to about 0.85 on the 4B and from 0.41 to about 0.82 on the 1.7B" width="100%" /></a>
+
+*Dev curves from Weights & Biases: red = 4B, green = 1.7B (the blue dot is a 10-step smoke run).
+600 questions from the `validation` splits of the three sources, never trained on, evaluated at
+step 0 and every 200 steps; accuracy = argmax against the argmax of the target distribution.
+These are in-distribution numbers: the benchmark below is the independent measurement.*
+
+### Results on typed-decisions
+
+Test split of [`LocalLLaMA/typed-decisions`](https://huggingface.co/datasets/LocalLLaMA/typed-decisions)
+(config `all`: 400 cases, 2,000 decisions, five questions over one shared state per case, sent as
+`/v1/systemone` requests; `scripts/typed_decisions.py`). Base and fine-tune measured on the same
+machine: llama.cpp b11081, CUDA, RTX 5060 Ti, Q8_0.
+
+| | Accuracy ↑ | KL from gold ↓ | Brier ↓ | ECE ↓ | Score within 1 level | p50 per case |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Spark-X2.5-4B, base | 0.574 | 2.899 | 0.480 | 0.349 | 0.688 | 201 ms |
+| **Rizzo Flow 4B (default)** | **0.648** | **0.452** | **0.205** | **0.112** | **0.931** | 195 ms |
+| Rizzo Flow 4B, Q4_K_M | 0.650 | 0.436 | 0.201 | 0.093 | 0.935 | 198 ms |
+| Spark-X2.5-1.7B, base | 0.530 | 3.031 | 0.496 | 0.348 | 0.636 | 117 ms |
+| Rizzo Flow 1.7B | 0.544 | 0.694 | 0.275 | 0.169 | 0.786 | 109 ms |
+| Rizzo Flow 1.7B, Q4_K_M | 0.490 | 0.640 | 0.279 | 0.192 | 0.790 | 107 ms |
+| TypeSafe Jev 1.13.0, from the dataset card (not re-measured) | 0.727 | 1.442 | 0.148 | – | – | – |
+
+Reading this honestly:
+
+- **4B: better answers and much better probabilities.** Accuracy +0.074, 95% interval
+  [+0.050, +0.101] (paired bootstrap over cases); KL from the gold distribution drops 6×. Every
+  workflow improves, most of all `agent_trace_observability` (0.366 → 0.502), where the base
+  answered "critical, needs human review" with p ≈ 0.9999 on almost every trace. Three questions
+  of twenty get worse (`agent_trace/outcome`, `invoice/duplicate`, `security/severity`).
+- **1.7B: probabilities improve, accuracy does not** (+0.014 [−0.014, +0.043], noise), and
+  `security_incidents` drops 0.612 → 0.514. Use the 4B when accuracy matters.
+- **Q4_K_M:** the 4B one ties Q8_0 on this benchmark (+0.002 [−0.011, +0.015]); on the original
+  weights Q4_K_M cost 4 points on SemIf's fixtures, not re-run here. The 1.7B one loses −0.054
+  [−0.070, −0.037]: at 2.6 GB the 4B Q4_K_M is the better small option.
+- **Still below Jev's published accuracy** (0.727). Its KL and Brier come from the card, computed
+  with formulas the card does not give (ours reproduce its Uniform row exactly). The gold labels
+  come from a ~4B teacher model, not from humans.
+- **Not zero-shot any more, but no leak**: the fine-tune has seen the typed-decision format, not
+  these workflows or states.
+- **SemIf fixtures (4B Q8_0)**: `authored144` 0.845 (SemIf Q8 0.819, tied: +0.027 [−0.038,
+  +0.099]), `perturbations108` 0.946 (SemIf 0.766, +0.180 [+0.108, +0.267]), but worse than the
+  base weights on missing evidence (0.583 against 0.750). Details in
+  [Results so far](#results-so-far); the other tables there are the base weights.
+- **Not yet re-measured on the fine-tune**: our smoke set and the 1.7B on the SemIf fixtures.
+  `--weights base` keeps the original files one flag away.
+
+The same fine-tune runs on **MLX** too (`--backend mlx` downloads it as BF16 safetensors from the
+same repositories): its weights are bit-identical to the BF16 GGUF, and on MLX-CUDA the 4B gives
+the same prompts and the same probabilities as llama.cpp BF16 within 0.001. The MLX runtime has
+not been scored on the whole benchmark.
+
+Reports (git-ignored, local): `results/local-typed-decisions/`.
+
+### Calibration
+
+Two different things improve the probabilities, and they add up:
+
+1. **The fine-tune** (above) reshapes them for everyone: on typed-decisions the expected
+   calibration error drops from 0.349 to 0.112 on the 4B (0.348 → 0.169 on the 1.7B), and the
+   Brier score from 0.480 to 0.205. The base model's 0.9999 on wrong answers mostly disappears.
+2. **Temperature scaling on your own data** makes them match *your* domain. Even after the
+   fine-tune the probabilities are **not calibrated** for a workload we have never seen, and
+   thresholds designed for Jev's `confidence` do not transfer.
+
+Temperature scaling is built in, per primitive, and bound to a fingerprint of weights, precision,
+runtime, compute backend and prompt version: a fit made on the base weights does not load on the
+fine-tune, and one made on CUDA does not load on Vulkan.
+
+```bash
+rizzo calibrate calibration.jsonl --fingerprint MODEL_HASH --output calibration-fit.json
+rizzo serve --calibration calibration-fit.json
+```
+
+`MODEL_HASH` is the `fingerprint` in the response metadata (`x_rizzo` on the Jev-compatible
+endpoint). You need labelled data from your own domain, a separate calibration set, and a
+held-out test. The evaluator reports accuracy, NLL, Brier, ECE and coverage.
 
 ---
 
@@ -299,8 +434,13 @@ the real SDK). **The interface is compatible, the model is not Jev:**
   Jev's exact formula is not public. It describes the *shape* of the distribution, not the
   probability of being right.
 - `usage.input_tokens` counts the state once plus the question suffixes; `output_tokens` is always 0.
+- Unknown top-level fields are ignored, as the hosted API does: SDKs forward caller-supplied ones.
+  Unknown fields *inside* a question are still a 422 — a misspelled `criteria` must not pass silently.
+- **At most 26 options per `choice`** (the hosted API documents 255): every option is one answer
+  letter. Beyond that, split the question into two stages.
 - `x_rizzo` (timings, fingerprint) is an extension outside the contract.
-- Bearer auth like the original, enforced only if `RIZZO_API_KEY` is set. Errors: 401, 422.
+- Bearer auth like the original, enforced only if `RIZZO_API_KEY` is set. Errors: 401, 422, and
+  400 (`{"error_type": "api_usage_error"}`) for a model name this server does not answer for.
 
 **Asking many questions at once is the point.** All questions in one request share the state's KV
 cache: 8 yes/no questions on a 218-token contract cost 1 prefill + 2 micro-batches, 136 ms of
@@ -366,7 +506,10 @@ Interactive OpenAPI docs: <http://127.0.0.1:8017/docs>. Schemas: `request.schema
 ## Results so far
 
 The runtime changed from MLX to llama.cpp on 22 September 2026, so there are two generations of
-numbers: the current ones first, then a summary of what MLX measured. Timings exclude model load
+numbers: the current ones first, then a summary of what MLX measured. **Every number in this
+section comes from the original Spark-X2.5 weights** (`--weights base`), except the first column
+of the table below (the fine-tuned default, 25 September 2026); typed-decisions is in
+[Fine-tuning](#fine-tuning). Timings exclude model load
 and warm-up and include request compilation plus synchronized GPU inference. All reports are
 committed, create-only, with logits, prompt hashes and weight hashes:
 [results/](results/README.md) (Italian).
@@ -378,29 +521,42 @@ with SemIf's own `benchmarks/evaluate.py` through `scripts/semif_compare.py`: sa
 metric, same timing scope; each system keeps its own prompt and model. GGUF files are the ones
 published by the model's authors.
 
-| Measure (Spark-X2.5-4B) | Q8_0 · CUDA (default) | BF16 · CUDA | Q4_K_M · CUDA | Q8_0 · Vulkan, same GPU | before: MLX-CUDA Q8 | SemIf Q8 (published) |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| `authored144`, mean-family balanced accuracy | 0.812 | 0.829 | 0.769 | 0.807 | 0.829 | 0.819 |
-| — held-out half only (72 rows) | 0.793 | 0.824 | 0.730 | 0.781 | 0.824 | 0.811 |
-| `perturbations108` | 0.848 | 0.859 | 0.835 | 0.854 | 0.865 | 0.766 |
-| — held-out half only (54 rows) | 0.861 | 0.875 | 0.801 | 0.861 | 0.875 | 0.824 |
-| Argmax flips: option reversal / wrapper / irrelevant context | 5 / 4 / 5 | 4 / 3 / 3 | 6 / 3 / 2 | 4 / 3 / 5 | 4 / 2 / 3 | 9 / 7 / 4 |
-| Missing evidence (36 rows): accuracy | 0.750 | 0.778 | 0.722 | 0.750 | 0.778 | 0.861 |
-| — confident (p ≥ 0.8) answers where `insufficient` was right | **6** | **6** | 5 | **6** | **6** | 1 |
-| Per-decision latency, short state (p50 / p95) | **49 / 52 ms** | 60 / 63 ms | 51 / 54 ms | 90 / 94 ms | 87 / 94 ms | not comparable |
-| `shape777` shared: 37 states (~2k tokens) × 21 criteria | **20.99 decisions/s** · 1.00 s per state | 17.75 · 1.19 s | 19.98 · 1.05 s | 14.84 · 1.35 s | 7.52 · 1.76 s | not comparable |
-| `shape777` fresh | 2.60 decisions/s | 1.97 | 2.39 (3 states) | 1.74 (3 states) | 1.65 | not comparable |
-| Argmax changes, shared vs fresh | 13 of 777 (max Δp 0.163) | 1 of 777 (0.064) | 2 of 63 (0.204) | 0 of 63 (0.028) | 2 of 777 (0.144) | — |
-| Peak GPU memory (drop in free memory since before the load) | 5.6 GiB | 9.3 GiB | 3.9 GiB | 6.0 GiB | 6.55 GiB (MLX allocator) | — |
+| Measure (Spark-X2.5-4B) | **fine-tuned** Q8_0 · CUDA (default) | base Q8_0 · CUDA | BF16 · CUDA | Q4_K_M · CUDA | Q8_0 · Vulkan, same GPU | before: MLX-CUDA Q8 | SemIf Q8 (published) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `authored144`, mean-family balanced accuracy | **0.845** | 0.812 | 0.829 | 0.769 | 0.807 | 0.829 | 0.819 |
+| — held-out half only (72 rows) | 0.809 | 0.793 | 0.824 | 0.730 | 0.781 | 0.824 | 0.811 |
+| `perturbations108` | **0.946** | 0.848 | 0.859 | 0.835 | 0.854 | 0.865 | 0.766 |
+| — held-out half only (54 rows) | **0.949** | 0.861 | 0.875 | 0.801 | 0.861 | 0.875 | 0.824 |
+| Argmax flips: option reversal / wrapper / irrelevant context | **1 / 1 / 1** | 5 / 4 / 5 | 4 / 3 / 3 | 6 / 3 / 2 | 4 / 3 / 5 | 4 / 2 / 3 | 9 / 7 / 4 |
+| Missing evidence (36 rows): accuracy | 0.583 | 0.750 | 0.778 | 0.722 | 0.750 | 0.778 | 0.861 |
+| — confident (p ≥ 0.8) answers where `insufficient` was right | **5** | **6** | **6** | 5 | **6** | **6** | 1 |
+| Per-decision latency, short state (p50 / p95) | same as base¹ | **49 / 52 ms** | 60 / 63 ms | 51 / 54 ms | 90 / 94 ms | 87 / 94 ms | not comparable |
+| `shape777` shared: 37 states (~2k tokens) × 21 criteria | same as base¹ | **20.99 decisions/s** · 1.00 s per state | 17.75 · 1.19 s | 19.98 · 1.05 s | 14.84 · 1.35 s | 7.52 · 1.76 s | not comparable |
+| `shape777` fresh | same as base¹ | 2.60 decisions/s | 1.97 | 2.39 (3 states) | 1.74 (3 states) | 1.65 | not comparable |
+| Argmax changes, shared vs fresh | 1 of 63 (0.027) | 13 of 777 (max Δp 0.163) | 1 of 777 (0.064) | 2 of 63 (0.204) | 0 of 63 (0.028) | 2 of 777 (0.144) | — |
+| Peak GPU memory (drop in free memory since before the load) | 5.6 GiB | 5.6 GiB | 9.3 GiB | 3.9 GiB | 6.0 GiB | 6.55 GiB (MLX allocator) | — |
+
+¹ Same architecture and quantization, so the same speed: the fine-tuned run measured 66 / 79 ms
+and 16.25 decisions/s shared, and the base weights run again right after it on the same machine
+gave 66 / 73 ms and 15.64 decisions/s (the machine was slower that day than on 22 September).
 
 Reading this honestly:
 
+- **The fine-tuned weights are clearly better under perturbation, tied on `authored144`.** Against
+  SemIf Q8: +0.027 [−0.038, +0.099] on `authored144` (tied), **+0.180 [+0.108, +0.267] on
+  `perturbations108`**; against our base weights +0.033 [−0.033, +0.105] and +0.098 [+0.001,
+  +0.204]. Most of the gain is `rule_application` under perturbation (0.611 → 0.870, NLL 1.69 →
+  0.33), and option-order flips drop to 1 of 36. SemIf's fixtures were excluded from the training
+  data (0 contaminated states, [docs/training.md](docs/training.md)). **It got worse on missing
+  evidence**: accuracy 0.583 against 0.750 for the base weights and 0.861 for SemIf, with 5
+  confident wrong answers of 36 (SemIf 1). Report:
+  [rizzo-flow-q8_0-v3-llama-cuda](results/semif-compare/rizzo-flow-q8_0-v3-llama-cuda/report.json).
 - **Changing the runtime did not change the quality beyond noise, and did not improve it.** Against
   the MLX run with the same prompt, llama.cpp Q8_0 picks a different option on 5 rows of 252:
   paired difference −0.017 on both sets, 95% interval [−0.043, 0.000]. At BF16 the two runtimes
   differ on 4 rows (+0.009 [0.000, +0.028]). Q8_0 here is llama.cpp's format, not MLX's 8-bit:
   they are different quantizations of the same weights. One row is 0.7–1.4 points.
-- **Against SemIf the picture is the same as before: tied.** Q8_0 −0.007 [−0.076, +0.065] on
+- **With the base weights, against SemIf the picture is the same as before: tied.** Q8_0 −0.007 [−0.076, +0.065] on
   `authored144`, BF16 +0.015 [−0.041, +0.079]. We claim no superiority. Half of these rows are
   the dev split prompt v3 was chosen on; the held-out half had been looked at once for the
   prompt and is reported again here only because the runtime changed.
@@ -477,30 +633,19 @@ did not change with the runtime: llama.cpp receives byte-identical prompts and t
 
 ---
 
-## Calibration
-
-Out of the box the distributions are often extremely peaked (0.9999 where Jev's docs show 0.88),
-so thresholds designed for Jev's `confidence` do not transfer. Temperature scaling is built in,
-per primitive, and bound to a fingerprint of weights, precision, runtime, compute backend and
-prompt version (so a fit made on MLX, or on CUDA, does not load on Vulkan):
-
-```bash
-rizzo calibrate calibration.jsonl --fingerprint MODEL_HASH --output calibration-fit.json
-rizzo serve --calibration calibration-fit.json
-```
-
-You need labelled data from your own domain, a separate calibration set, and a held-out test. The
-evaluator reports accuracy, NLL, Brier, ECE and coverage.
-
 ## Known limitations
 
-- Probabilities are uncalibrated by default; `status: ok` does not mean *correct*.
+- Probabilities are uncalibrated by default, fine-tune or not; `status: ok` does not mean *correct*.
+- The fine-tuned default has been measured on typed-decisions only; the SemIf and smoke numbers
+  in [Results so far](#results-so-far) are for the original weights (`--weights base`).
 - The model under-uses abstention and out-of-range options, and answers confidently when the
   evidence is missing (6 of 36 cases, against SemIf's 1).
 - Residual position bias; permutation debiasing is not implemented.
 - 26 options per question (Jev: 255; SemIf: 16). Beyond that you need two stages.
-- **Tested on one machine.** Only Windows + NVIDIA (CUDA and Vulkan builds) has been run by us;
-  macOS/Metal, Linux, AMD, Intel and CPU-only are untested.
+- **Tested by us on one machine.** Only Windows + NVIDIA (CUDA and Vulkan builds) has been run
+  by us. Community reports cover macOS/Metal (M3 Pro), AMD and Intel iGPUs with Vulkan on Linux
+  and Windows, and CPU-only on an Intel laptop (see the hardware table); ROCm, SYCL and a
+  GPU-free machine are untested.
 - llama.cpp is driven through ctypes bindings tied to one pinned release (`b11081`): a build of
   another commit can crash instead of failing cleanly.
 - The KV cache costs ~144 KiB per token on the 4B, four times what the MLX runtime needs:
@@ -516,7 +661,7 @@ evaluator reports accuracy, NLL, Brier, ECE and coverage.
 
 ```bash
 uv sync --locked --extra test
-uv run pytest -q                        # 65 tests, no weights needed
+uv run pytest -q                        # 82 tests, no weights needed
 RIZZO_REAL=1 uv run pytest -q -m integration   # 4 more, on the real runtime and GGUF weights
 uv run ruff check src tests scripts
 uv run rizzo evaluate benchmarks/smoke.jsonl --compare-modes --output results/local-smoke.json
@@ -552,9 +697,43 @@ Architecture notes and the current state of the work: [CLAUDE.md](CLAUDE.md) (It
   and honest measurements. It convinced us to make llama.cpp the default runtime for every
   GPU vendor. The implementation on `main` is a separate one (prebuilt binaries instead of a
   build step); their fix to `.gitignore` for local result files is merged as their commit.
+  Then, on the RX 7900 XTX, they found `rizzo download` installing the CUDA build on an AMD
+  machine that only had a leftover `libcuda.so.1`, and fixed it: the probe now asks the driver
+  for a device ([pull request #6](https://github.com/Rizzo-AI-Academy/rizzo-flow/pull/6)).
+- [**danilocarta**](https://github.com/danilocarta) — the first run on a Mac: M3 Pro, Metal,
+  with numbers ([issue #5](https://github.com/Rizzo-AI-Academy/rizzo-flow/issues/5)), and the two
+  fixes it needed: the context freed before exit, where Metal aborted every command, and a
+  warning when an x86_64 Python under Rosetta silently costs the GPU
+  ([pull request #4](https://github.com/Rizzo-AI-Academy/rizzo-flow/pull/4)).
+- [**radqnico**](https://github.com/radqnico) — `--kv-type q8_0|q4_0`, a quantized KV cache for
+  long contexts on small GPUs
+  ([pull request #10](https://github.com/Rizzo-AI-Academy/rizzo-flow/pull/10)).
+- [**yjnhk**](https://github.com/yjnhk) — the first Intel run: Iris Xe with Vulkan, and the first
+  CPU-only numbers ([issue #7](https://github.com/Rizzo-AI-Academy/rizzo-flow/issues/7)).
+- [**FrancescoLength**](https://github.com/FrancescoLength) — the first AMD run on real AMD
+  hardware: Radeon 780M with Vulkan on Linux, with a lesson on wording for domain tasks
+  ([issue #11](https://github.com/Rizzo-AI-Academy/rizzo-flow/issues/11)).
+- [**MrJev**](https://github.com/MrJev) — found that `NaN` in a request body returned a 500 where
+  every other malformed input returns a clean 422
+  ([issue #3](https://github.com/Rizzo-AI-Academy/rizzo-flow/issues/3)), and independently
+  verified the published results: all 36 `SHA256SUMS`, every `dataset_sha256`, and every metric
+  recomputed from its own rows.
+- [**mandu5**](https://github.com/mandu5) — ran a Jev conformance suite
+  ([jevcompat](https://github.com/mandu5/jevcompat)) against `/v1/systemone` and reported the three
+  differences precisely ([issue #12](https://github.com/Rizzo-AI-Academy/rizzo-flow/issues/12)):
+  unknown top-level fields and the unknown-model error shape are fixed, the 26-option cap is now
+  documented as the deliberate limit it is.
+- [**chasseurmic**](https://github.com/chasseurmic) and
+  [**dajiaohuang**](https://github.com/dajiaohuang) — reported and patched `--device metal` failing
+  on Apple silicon, where the backend registers itself as `MTL`
+  ([issue #9](https://github.com/Rizzo-AI-Academy/rizzo-flow/issues/9),
+  [pull request #14](https://github.com/Rizzo-AI-Academy/rizzo-flow/pull/14)). The fix on `main` is
+  a wider one, written separately; both pointed at the right line. dajiaohuang also brought the
+  community hardware reports into the READMEs and the landing page, kept apart from what we
+  verified ourselves ([pull request #13](https://github.com/Rizzo-AI-Academy/rizzo-flow/pull/13)).
 
-Want to be next? The most useful contribution right now is a run on hardware we do not have:
-an AMD or Intel GPU, a Mac, Linux, or a machine without a GPU —
+Want to be next? The most useful next reports are from Linux, other AMD or Intel GPUs,
+different Apple Silicon models, ROCm/SYCL builds, or a dedicated CPU-only machine. Please
 [open an issue](https://github.com/Rizzo-AI-Academy/rizzo-flow/issues) with the output of
 `rizzo devices` and your timings.
 

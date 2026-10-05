@@ -2,7 +2,7 @@
 
 import pytest
 
-from rizzo_flow import backend_llama, loader
+from rizzo_flow import backend_llama, config, loader
 from rizzo_flow.backend_llama import LlamaBackend, LlamaTokenizer
 from rizzo_flow.llama_cpp import Device, choose_device
 from rizzo_flow.prompts import Compiled
@@ -50,6 +50,9 @@ class FakeSession:
 
     def synchronize(self):
         pass
+
+    def close(self):
+        self.calls.append(("close",))
 
     def free_bytes(self):
         return None
@@ -177,6 +180,7 @@ IGPU = Device(2, "Vulkan0", "Intel(R) UHD Graphics", "igpu", "Vulkan", 32 << 30)
 RADEON = Device(3, "Vulkan1", "AMD Radeon RX 7900 XTX", "gpu", "Vulkan", 24 << 30)
 SMALL = Device(4, "Vulkan2", "AMD Radeon RX 6600", "gpu", "Vulkan", 8 << 30)
 GEFORCE = Device(5, "CUDA0", "NVIDIA GeForce RTX 5060 Ti", "gpu", "CUDA", 16 << 30)
+METAL = Device(6, "MTL0", "Apple M4", "gpu", "MTL", 16 << 30)  # Apple registers itself as MTL
 
 
 def test_device_choice():
@@ -194,6 +198,19 @@ def test_device_choice():
         choose_device(machine, "cuda")
 
 
+def test_metal_is_found_under_its_registry_name():
+    # Apple's backend calls itself MTL: `--device metal` must still find it (issue #9).
+    assert choose_device([CPU, METAL], "metal") is METAL
+    assert choose_device([CPU, METAL], "Metal") is METAL
+    assert choose_device([CPU, METAL], "mtl") is METAL
+    assert choose_device([CPU, METAL], "MTL0") is METAL  # one named device, as before
+    assert choose_device([CPU, METAL], "auto") is METAL
+    assert choose_device([CPU, METAL], "m4") is METAL  # description still matches
+    with pytest.raises(ValueError, match="no such GPU"):
+        choose_device([CPU, METAL], "cuda")  # an alias never widens another family
+    assert choose_device([CPU, IGPU, RADEON], "vulkan") is RADEON  # numbered names unaffected
+
+
 def test_loader_rejects_options_of_the_other_backend(tmp_path):
     with pytest.raises(ValueError, match="--quant"):
         loader.load_backend("llama", bits=8)
@@ -203,9 +220,56 @@ def test_loader_rejects_options_of_the_other_backend(tmp_path):
         loader.load_backend("llama", device="mlx")
     with pytest.raises(ValueError, match="llama backend"):
         loader.load_backend("mlx", device="vulkan")
+    with pytest.raises(ValueError, match="--kv-type"):
+        loader.load_backend("mlx", kv_type="q8_0")
     with pytest.raises(ValueError, match=".gguf"):
         loader.load_backend("llama", model=tmp_path)
     with pytest.raises(ValueError, match="rizzo download"):
         loader.load_backend("llama", model=tmp_path / "missing.gguf")
     with pytest.raises(ValueError, match="one of"):
         loader.load_backend("onnx")
+    with pytest.raises(ValueError, match="--weights"):
+        loader.load_backend("mlx", model=tmp_path, weights="flow")
+    with pytest.raises(ValueError, match="--weights"):
+        loader.load_backend("llama", model=tmp_path / "mine.gguf", weights="base")
+    with pytest.raises(ValueError, match="No flow GGUF"):
+        config.gguf_spec("4b", "q2_k")
+
+
+def test_fine_tuned_weights_are_the_default_and_pinned():
+    spec = config.gguf_spec()
+    assert (spec.size, spec.quant, spec.variant) == ("4b", "q8_0", "flow")
+    assert spec.repo == "rizzoaiacademy/rizzo-flow" and len(spec.revision) == 40
+    assert config.gguf_spec("1.7b").repo == "rizzoaiacademy/rizzo-flow-1.7b"
+    assert config.gguf_spec("4b", "q4_k_m", "base").repo == "XHToken/Spark-X2.5-4B-GGUF"
+    assert len({spec.sha256 for spec in config.GGUF.values()}) == len(config.GGUF)
+    assert len({spec.path for spec in config.GGUF.values()}) == len(config.GGUF)
+    # MLX: the merged checkpoint sits next to the GGUF files; base keeps XHToken's directory.
+    assert config.checkpoint_path() == config.FLOW_CHECKPOINTS["4b"].path == spec.path.parent
+    assert config.checkpoint_path("1.7b", "base") == config.MODELS["1.7b"].path
+    for flow in config.FLOW_CHECKPOINTS.values():
+        assert flow.weights and all(len(sha) == 64 for sha in flow.weights.values())
+        assert not set(flow.weights) & set(config.CHECKPOINT_FILES)
+
+
+def test_hf_token_comes_from_the_environment_then_dotenv_then_login(tmp_path, monkeypatch):
+    for name in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HF_HOME", str(tmp_path / "hf"))
+    assert config.hf_token() is None
+    (tmp_path / "hf").mkdir()
+    (tmp_path / "hf" / "token").write_text("hf_saved\n", encoding="utf-8")
+    assert config.hf_token() == "hf_saved"
+    (tmp_path / ".env").write_text('# local\nOTHER=1\nHF_TOKEN="hf_dotenv"\n', encoding="utf-8")
+    assert config.hf_token() == "hf_dotenv"
+    monkeypatch.setenv("HF_TOKEN", "hf_env")
+    assert config.hf_token() == "hf_env"
+
+
+def test_close_releases_the_session_before_the_interpreter_goes_away():
+    """The Metal device is torn down by a static destructor at exit and aborts if a buffer is
+    still registered, so the context has to be freed while Python is still running."""
+    engine = backend()
+    engine.close()
+    assert ("close",) in engine.session.calls

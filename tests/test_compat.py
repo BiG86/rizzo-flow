@@ -1,9 +1,11 @@
+import copy
+
 import pytest
 from fastapi.testclient import TestClient
 from test_service import FakeBackend
 
 from rizzo_flow.api import create_app
-from rizzo_flow.compat import SystemOneRequest, confidence, to_native
+from rizzo_flow.compat import SystemOneRequest, confidence, model_name, to_native
 from rizzo_flow.engine import Engine
 
 
@@ -81,9 +83,17 @@ def test_validation_models_and_auth(body):
     with client() as http:
         names = [m["name"] for m in http.get("/v1/models").json()["models"]]
         assert "rizzo-latest" in names and "jev-latest" in names
-        assert http.post("/v1/systemone", json={**body, "model": "gpt-unknown"}).status_code == 422
+        unknown = http.post("/v1/systemone", json={**body, "model": "gpt-unknown"})
+        assert unknown.status_code == 400  # the hosted API's shape, not a validation error
+        assert unknown.json()["detail"]["error_type"] == "api_usage_error"
         missing = {k: v for k, v in body.items() if k != "model"}
         assert http.post("/v1/systemone", json=missing).status_code == 422
+        # The hosted API does not forbid unknown top-level fields; the SDK forwards them.
+        extra = http.post("/v1/systemone", json={**body, "x_trace_id": "abc", "seed": 7})
+        assert extra.status_code == 200 and "x_trace_id" not in extra.json()
+        unknown_question_field = copy.deepcopy(body)
+        unknown_question_field["questions"]["frustration"]["temperature"] = 0.5
+        assert http.post("/v1/systemone", json=unknown_question_field).status_code == 422
         body["questions"]["frustration"]["criteria"] = ["only one"]
         assert http.post("/v1/systemone", json=body).status_code == 422
         assert "Rizzo Flow" in http.get("/playground").text
@@ -115,3 +125,11 @@ def test_twenty_six_answer_letters(body):
         assert http.post("/v1/decisions", json=native(26, False)).status_code == 200
         assert http.post("/v1/decisions", json=native(25, True)).status_code == 200
         assert http.post("/v1/decisions", json=native(26, True)).status_code == 422
+
+
+def test_fine_tuned_weights_get_their_own_model_name():
+    base = {"source": "XHToken/Spark-X2.5-4B", "precision": "q8_0"}
+    assert model_name(base) == "rizzo-spark-x2.5-4b-q8_0"
+    assert model_name({**base, "weights": "flow"}) == "rizzo-flow-4b-q8_0"
+    small = {"source": "XHToken/Spark-X2.5-1.7B", "precision": "bf16", "weights": "flow"}
+    assert model_name(small) == "rizzo-flow-1.7b-bf16"

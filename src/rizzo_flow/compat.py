@@ -52,6 +52,11 @@ WireQuestion = Annotated[NoulQuestion | ChoiceQuestion | ScoreQuestion, Field(di
 
 
 class SystemOneRequest(Wire):
+    # The hosted API does not forbid unknown top-level fields and the official SDK forwards
+    # caller-supplied ones (`extra_body`, e.g. a trace id), so they are ignored rather than
+    # rejected. The native route keeps `extra="forbid"`; this leniency is the wire format's.
+    model_config = ConfigDict(extra="ignore", strict=True)
+
     state: Structured
     model: str = Field(min_length=1, max_length=128)
     questions: dict[str, WireQuestion] = Field(min_length=1, max_length=64)
@@ -68,14 +73,21 @@ class SystemOneRequest(Wire):
 
 def model_name(metadata: dict) -> str:
     checkpoint = metadata.get("source", MODEL_ID).split("/")[-1].lower()  # spark-x2.5-4b
-    return f"rizzo-{checkpoint}-{metadata.get('precision', 'unknown')}"
+    precision = metadata.get("precision", "unknown")
+    if metadata.get("weights") == "flow":  # our fine-tune: rizzo-flow-4b-q8_0
+        return f"rizzo-flow-{checkpoint.rsplit('-', 1)[-1]}-{precision}"
+    return f"rizzo-{checkpoint}-{precision}"
+
+
+class UnknownModel(ValueError):
+    """A model name this server does not answer for; the hosted API reports it as a 400."""
 
 
 def resolve_model(requested: str, metadata: dict) -> str:
     served = model_name(metadata)
     if requested in (LOCAL_ALIAS, served) or requested.startswith(FOREIGN_PREFIX):
         return served
-    raise ValueError(
+    raise UnknownModel(
         f"Unknown model {requested!r}. Use {LOCAL_ALIAS!r}, {served!r} or a {FOREIGN_PREFIX}* alias."
     )
 

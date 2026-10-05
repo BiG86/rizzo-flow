@@ -10,8 +10,12 @@ decisioni tipizzate con probabilità, zero generazione di testo), ispirata a **S
 di risposta in un forward pass. Modello: **XHToken/Spark-X2.5-4B** (architettura `spark2_5`, rev.
 `0bcb356…`). **Runtime predefinito dal 22 settembre 2026: llama.cpp** (release `b11081`, pacchetti
 precompilati ufficiali scaricati da `rizzo download`, binding ctypes; Metal, CUDA, Vulkan per
-AMD/Intel/NVIDIA, ROCm, SYCL, CPU) con i GGUF ufficiali di XHToken: `q8_0` (default), `q4_k_m`,
-`bf16`. **MLX resta come secondo runtime** (`--backend mlx`, extra `mlx|cuda|cpu`; pesi originali,
+AMD/Intel/NVIDIA, ROCm, SYCL, CPU). **Pesi predefiniti dal 25 settembre 2026: il nostro
+fine-tuning LoRA** (`--weights flow`, repo pubblici `rizzoaiacademy/rizzo-flow` rev. `55633c8c…` e
+`rizzoaiacademy/rizzo-flow-1.7b`: `q8_0`, `q4_k_m` (nostra, `llama-quantize` b11081 senza
+imatrix), `bf16`); `--weights base` = GGUF
+ufficiali di XHToken: `q8_0`, `q4_k_m`, `bf16`. `config.GGUF` è indicizzato da (size, quant,
+variant); `config.gguf_spec` dà errore per combinazioni inesistenti (niente ripieghi silenziosi). **MLX resta come secondo runtime** (`--backend mlx`, extra `mlx|cuda|cpu`; pesi originali,
 BF16 di default, Q8/Q4 affini in memoria con group size 64): è quello con cui sono stati misurati
 tutti i numeri fino al 21 settembre e l'unico provato sul Mac (M4 Pro 24 GiB).
 `config.MODELS` elenca i checkpoint supportati: `4b` (default) e `1.7b` (XHToken/Spark-X2.5-1.7B, rev.
@@ -27,11 +31,11 @@ il README pubblico è in inglese, quello italiano storico è in `docs/README.it.
 
 ```bash
 uv sync --extra test --locked                     # llama.cpp non richiede extra; MLX: --extra mlx|cuda|cpu
-.venv/bin/rizzo download                          # runtime llama.cpp per questa macchina (runtimes/) + GGUF Q8_0 (~4.4 GB, models/)
+.venv/bin/rizzo download                          # runtime llama.cpp per questa macchina (runtimes/) + GGUF fine-tuned Q8_0 (~4.4 GB, models/rizzo-flow/); --weights base = XHToken
 .venv/bin/rizzo download --only runtime --runtime vulkan   # un'altra build; --backend mlx scarica i pesi originali (~8 GB)
 .venv/bin/rizzo devices                           # device visti da llama.cpp e scelta di auto; su Windows gli eseguibili sono in .venv/Scripts/
-.venv/bin/pytest -q                               # 65 test (+4 saltati), ~3 s, nessun peso richiesto
-RIZZO_REAL=1 .venv/bin/pytest -q -m integration   # 4 test con runtime e GGUF reali (il più piccolo Q8_0 presente)
+.venv/bin/pytest -q                               # 82 test (+6 saltati), nessun peso richiesto
+RIZZO_REAL=1 .venv/bin/pytest -q -m integration   # 6 test con runtime e GGUF reali (il più piccolo Q8_0 presente)
 .venv/bin/pytest tests/test_compat.py::test_systemone_wire_shape   # test singolo
 .venv/bin/ruff check src tests scripts && .venv/bin/ruff format --check src tests scripts
 .venv/bin/rizzo serve                             # API + playground su 127.0.0.1:8017 (MLX: --backend mlx --bits 8)
@@ -192,6 +196,37 @@ sulla pagina vanno tenuti allineati a README e `results/`.
 
 ## Stato del lavoro (22 settembre 2026)
 
+### Fine-tuning LoRA come default (25 settembre 2026)
+
+Addestrato dall'utente con `training/` (pipeline in `docs/training.md`) su RTX PRO 6000, pesi fusi
+e pubblicati in GGUF sui due repo HF (resi pubblici il 25 settembre su richiesta dell'utente).
+`--weights flow|base` su CLI e script, per entrambi i backend: MLX scarica dagli stessi repo il
+checkpoint BF16 safetensors fuso (radice del repo, `config.FLOW_CHECKPOINTS`, sha256 dei shard
+fissati; solo i file di `CHECKPOINT_FILES`, niente GGUF né adapter) in `models/rizzo-flow*/`.
+Rifatto qui con `training/export_gguf.py` (`RIZZO_TRAIN_SIZE=1.7b` per il piccolo): il GGUF BF16
+ottenuto ha lo **stesso sha256** di quello pubblicato, quindi i safetensors sono i pesi esatti;
+`tokenizer_config.json` caricato è quello originale (l'export toglie il template solo per la
+conversione). MLX-CUDA BF16 = llama.cpp BF16 entro 0.001 sul ticket, stessi `prompt_sha256`. Il fingerprint dei file
+fine-tuned ha la chiave in più `weights: "flow"` (quelli base restano invariati), l'ID servito è
+`rizzo-flow-4b-q8_0` (base: `rizzo-spark-x2.5-4b-q8_0`). `llama_release.fetch` accetta un token
+(`config.hf_token`: `HF_TOKEN`, `.env` nella cartella di lavoro, token di `hf auth login`),
+mandato solo al primo host e non nei redirect; 401/403/404 falliscono subito.
+typed-decisions test (`scripts/typed_decisions.py`, report in `results/local-typed-decisions/`,
+ignorati da git), stessa macchina RTX 5060 Ti, Q8_0: 4B 0.574 → **0.648** (+0.074 [+0.050,
++0.101]), KL 2.90 → 0.45, Brier 0.480 → 0.205, ECE 0.349 → 0.112; 1.7B 0.530 → 0.544 (rumore),
+KL 3.03 → 0.69, `security_incidents` 0.612 → 0.514. Q4_K_M: 4B 0.650 (pari a Q8_0, +0.002
+[−0.011, +0.015]), 1.7B 0.490 (−0.054 [−0.070, −0.037]). Jev dalla card: 0.727.
+Fixture SemIf, 4B Q8_0 fine-tuned (`results/semif-compare/rizzo-flow-q8_0-v3-llama-cuda/`, SemIf
+**non** rieseguito: confronto con le sue predizioni pubblicate): authored144 **0.845** (base
+0.812, SemIf 0.819; vs SemIf +0.027 [−0.038, +0.099], pari), perturbations108 **0.946** (base
+0.848, SemIf 0.766; vs SemIf **+0.180 [+0.108, +0.267]**, prima superiorità dimostrata), held-out
+0.809 / 0.949, flip 1/1/1, `rule_application` perturbata 0.870 (NLL 0.33). **Peggiora
+sull'evidenza mancante**: 0.583 (base 0.750, SemIf 0.861), 5 scelte sicure sbagliate su 36.
+Latenza uguale ai pesi base (rilanciati in sequenza lo stesso giorno: 66 ms entrambi; quel giorno
+la macchina era più lenta dei 49 ms del 22/9). Landing, README, `results/README.md` aggiornati.
+**Non ancora rimisurati sul fine-tuning:** smoke, 1.7B su SemIf, demo della landing (`DEMO` in
+`docs/index.html`, registrato sui pesi base): le altre tabelle storiche sotto sono dei pesi base.
+
 ### Passaggio a llama.cpp (22 settembre 2026, su `main`)
 
 Origine: la PR #1 di BiG86 (backend llama.cpp per AMD, ctypes su una build compilata a mano,
@@ -201,9 +236,13 @@ alla PR: binari precompilati ufficiali con sha256 invece della compilazione, GGU
 XHToken invece di una conversione di terzi, device enumerati da ggml invece di sondare `/sys`,
 cache unificata (prefisso condiviso, non `ctx × (batch+1)`), Windows/macOS/Linux.
 
-Provato **solo** su Windows 10 + RTX 5060 Ti, build CUDA 13.4 e build Vulkan sulla stessa scheda.
-**Mai eseguiti: macOS/Metal (il Mac dell'utente!), Linux, AMD, Intel, ROCm, SYCL, sola CPU** —
-regola dell'utente: su questo PC niente prove su CPU. Prima cosa da fare sul Mac:
+Provato **da noi solo** su Windows 10 + RTX 5060 Ti, build CUDA 13.4 e build Vulkan sulla stessa
+scheda. Segnalazioni della community (24 settembre 2026, non riprodotte da noi): M3 Pro/Metal
+(issue #5, con le due correzioni della PR #4: contesto liberato prima dell'uscita, avviso Rosetta),
+Radeon 780M/Vulkan su Linux (#11), Iris Xe/Vulkan e sola CPU su Windows (#7), RX 7900 XTX/Vulkan
+su Linux (PR #6: la sonda CUDA ora chiede un device). Mai eseguiti: ROCm, SYCL, macchina senza
+GPU; il Mac dell'utente (M4 Pro) non ancora — regola dell'utente: su questo PC niente prove su
+CPU. `--kv-type q8_0|q4_0` (PR #10) misurato solo su CUDA. Prima cosa da fare sul Mac:
 `uv sync --locked && rizzo download && rizzo devices && RIZZO_REAL=1 pytest -m integration`.
 
 Numeri (4B, prompt v3; report in `results/semif-compare/*-llama-*`, `analysis.json` accanto;
@@ -355,8 +394,10 @@ CUDA su Linux e l'extra `mlx` dopo queste modifiche **non sono stati provati** (
   propri di breve vita, fuori da `Engine`, resta esposto.
 
 ### Da fare
-- **Provare llama.cpp sul Mac (Metal)** e, appena possibile, su Linux e su una GPU AMD o Intel
-  vera; rispondere a BiG86 sulla PR #1 (la sua RX 7900 XTX sarebbe la prima prova AMD).
+- **Provare llama.cpp sul Mac dell'utente (M4 Pro, Metal)**; ROCm, SYCL e `--kv-type` su Vulkan
+  restano da provare.
+- PR aperte non unite: #8 (tipi strutturati; saltata dall'utente: CRLF e conflitti) e #2 (port
+  Rust: da decidere, proposto un repository separato).
 - Ri-registrare Snake GIF e screenshot del playground con llama.cpp.
 - Cache a finestra compatta con rami condivisi (oggi `swa_full`): servirebbe potare la sequenza 0
   solo nella cache SWA, cosa che l'API pubblica non permette.
